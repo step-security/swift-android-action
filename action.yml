@@ -1,0 +1,774 @@
+name: 'Swift Android Action'
+description: 'Cross-compiles a swift package for Android and runs the test cases in an Android emulator'
+branding:
+  icon: 'target'
+  color: 'orange'
+
+outputs:
+  swift-build:
+    description: 'Fully-formed `swift build` invocation wired to the host toolchain and Android SDK that this action installed.'
+    value: ${{ steps.install.outputs.swiftcmd }}
+  swift-sdk:
+    description: 'Identifier of the Android Swift SDK target triple selected for cross-compilation (e.g., x86_64-unknown-linux-android24).'
+    value: ${{ steps.install.outputs.swift-sdk }}
+  swift-install:
+    description: 'Absolute path to the installed Swift host toolchain (the `usr` directory containing bin/swift).'
+    value: ${{ steps.install.outputs.swiftroot }}
+
+inputs:
+  swift-version:
+    description: 'Swift toolchain version to install. Accepts release tags (e.g. "6.3"), the aliases "latest" / "snapshot" / "latest-6.2", nightly identifiers like "nightly-main" or "nightly-6.3", and explicit dev snapshots such as "6.3-DEVELOPMENT-SNAPSHOT-2025-12-07-a".'
+    required: true
+    default: 'latest'
+  ndk-version:
+    description: 'Android NDK version selector for Swift 6.2 and newer (e.g. "27", "27.0", "27.2.12479018", or "latest"). Leave empty to keep the runner default.'
+    required: false
+    type: string
+    default: ''
+  swift-branch:
+    description: 'Override for the swift.org download branch (e.g. "swift-6.3-release", "development"). When empty the branch is inferred from `swift-version`.'
+    required: true
+    default: ''
+  package-path:
+    description: 'Path to the Swift package to build, relative to the workspace root.'
+    required: true
+    default: '.'
+  swift-build-flags:
+    description: 'Extra arguments appended to every `swift build` invocation.'
+    required: true
+    default: ''
+  swift-configuration:
+    description: 'Build configuration: "debug" or "release".'
+    required: true
+    default: 'debug'
+  swift-test-flags:
+    description: 'Extra arguments forwarded to the test-runner binaries on the emulator.'
+    required: true
+    default: ''
+  android-emulator-test-folder:
+    description: 'Absolute on-device folder used to stage and execute the test bundle inside the emulator.'
+    required: true
+    default: '/data/local/tmp/swift-android-tests'
+  test-env:
+    description: 'Whitespace-separated `KEY=VALUE` pairs exported into the test process on the emulator.'
+    required: true
+    default: ''
+  android-emulator-options:
+    description: 'Extra CLI flags passed through to the Android emulator process.'
+    required: true
+    default: '-no-window -noaudio -no-boot-anim'
+  android-emulator-boot-timeout:
+    description: 'Maximum number of seconds to wait for the emulator to finish booting before giving up.'
+    required: true
+    default: 600
+  free-disk-space:
+    description: 'When "true", deletes a curated set of large pre-installed runner tools (Xcodes, dotnet, chromium, etc.) prior to launching the emulator to recover disk space.'
+    required: false
+    default: 'false'
+  build-package:
+    description: 'When "true", builds the Swift package after installing the toolchain/SDK. Set to "false" to only stage the environment.'
+    required: true
+    default: 'true'
+  build-tests:
+    description: 'When "true", `--build-tests` is added to the build so test binaries are produced. Set to "false" to skip building tests.'
+    required: true
+    default: 'true'
+  run-tests:
+    description: 'When "true", launches the emulator and executes the built test binaries. Set to "false" to stop after the build step.'
+    required: true
+    default: 'true'
+  copy-files:
+    description: 'Additional files or directories (relative to `package-path`) copied next to the test binaries on the emulator.'
+    required: true
+    default: ''
+  android-cores:
+    description: 'Number of CPU cores allocated to the Android emulator instance.'
+    required: true
+    default: 2
+  android-api-level:
+    description: 'Android API level that the emulator boots against (also drives the compile SDK target by default).'
+    required: true
+    default: 28
+  compile-sdk-api-level:
+    description: 'Override for the API level baked into the Swift Android SDK build triple. Falls back to `android-api-level` when unset.'
+    required: false
+    default: ''
+  android-channel:
+    description: 'SDK Manager component channel used by the emulator runner ("stable", "beta", "dev", or "canary").'
+    required: false
+    type: string
+    default: 'stable'
+  android-profile:
+    description: 'Hardware profile name used when creating the AVD (e.g. "pixel"). Empty selects the runner default.'
+    required: false
+    type: string
+    default: ''
+  android-target:
+    description: 'System-image target for the AVD (e.g. "default", "google_apis", "aosp_atd").'
+    required: false
+    type: string
+    default: 'default'
+  installed-sdk:
+    description: 'Triple of a Swift Android SDK that is already installed on the runner; when set, the action skips downloading an SDK.'
+    required: false
+    type: string
+    default: ''
+  installed-swift:
+    description: 'Path to a Swift host toolchain that is already installed; when set, the action skips downloading the host toolchain.'
+    required: false
+    type: string
+    default: ''
+  custom-sdk-url:
+    description: 'Direct URL to a custom Swift Android SDK artifactbundle archive. Requires `installed-sdk` and `custom-sdk-id` to also be supplied.'
+    required: false
+    type: string
+    default: ''
+  custom-sdk-id:
+    description: 'Artifact identifier used when installing the SDK referenced by `custom-sdk-url`.'
+    required: false
+    type: string
+    default: ''
+
+runs:
+  using: "composite"
+  steps:
+    - name: Subscription check
+      env:
+        REPO_PRIVATE: ${{ github.event.repository.private }}
+      run: |
+        # validate subscription status
+        UPSTREAM="skiptools/swift-android-action"
+        ACTION_REPO="${GITHUB_ACTION_REPOSITORY:-}"
+        DOCS_URL="https://docs.stepsecurity.io/actions/stepsecurity-maintained-actions"
+
+        echo ""
+        echo -e "\033[1;36mStepSecurity Maintained Action\033[0m"
+        echo "Secure drop-in replacement for $UPSTREAM"
+        if [ "$REPO_PRIVATE" = "false" ]; then
+          echo -e "\033[32m✓ Free for public repositories\033[0m"
+        fi
+        echo -e "\033[36mLearn more:\033[0m $DOCS_URL"
+        echo ""
+
+        if [ "$REPO_PRIVATE" != "false" ]; then
+          SERVER_URL="${GITHUB_SERVER_URL:-https://github.com}"
+
+          if [ "$SERVER_URL" != "https://github.com" ]; then
+            BODY=$(printf '{"action":"%s","ghes_server":"%s"}' "$ACTION_REPO" "$SERVER_URL")
+          else
+            BODY=$(printf '{"action":"%s"}' "$ACTION_REPO")
+          fi
+
+          API_URL="https://agent.api.stepsecurity.io/v1/github/$GITHUB_REPOSITORY/actions/maintained-actions-subscription"
+
+          RESPONSE=$(curl --max-time 3 -s -w "%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "$BODY" \
+            "$API_URL" -o /dev/null) && CURL_EXIT_CODE=0 || CURL_EXIT_CODE=$?
+
+          if [ $CURL_EXIT_CODE -ne 0 ]; then
+            echo "Timeout or API not reachable. Continuing to next step."
+          elif [ "$RESPONSE" = "403" ]; then
+            echo -e "::error::\033[1;31mThis action requires a StepSecurity subscription for private repositories.\033[0m"
+            echo -e "::error::\033[31mLearn how to enable a subscription: $DOCS_URL\033[0m"
+            exit 1
+          fi
+        fi
+      shell: bash
+
+    - name: Setup swift-android-action
+      id: setup
+      shell: bash
+      env:
+        REQUESTED_SWIFT_VERSION: ${{ inputs.swift-version }}
+        REQUESTED_SWIFT_BRANCH: ${{ inputs.swift-branch }}
+        REQUESTED_NDK_VERSION: ${{ inputs.ndk-version }}
+        WORKER_TEMP: ${{ runner.temp }}
+      run: |
+        set -euo pipefail
+
+        emit_out() { printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
+        emit_env() { printf '%s=%s\n' "$1" "$2" >> "$GITHUB_ENV"; }
+        note()     { printf -- "** %s\n" "$*" >&2; }
+        abort()    { printf -- "** ::error::%s\n" "$*" >&2; exit 1; }
+
+        # ---- host/runner OS detection ---------------------------------------
+        case "${RUNNER_OS}" in
+          Linux)
+            # KVM permission tweak so the Android emulator can use hardware accel
+            # (see ReactiveCircus/android-emulator-runner docs).
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null <<<'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"'
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+
+            # pick up ID / VERSION_ID from /etc/os-release
+            . /etc/os-release
+            emit_out osidpair "${ID}${VERSION_ID}"
+            emit_out osid     "${ID}${VERSION_ID//./}"
+
+            # patchelf is used downstream to introspect .xctest binaries
+            command -v patchelf >/dev/null 2>&1 || apt install patchelf
+            ;;
+          macOS)
+            emit_out osidpair "macos"
+            emit_out osid     "macos"
+            command -v patchelf >/dev/null 2>&1 || brew install patchelf
+            ;;
+          *)
+            abort "Unsupported platform: ${RUNNER_OS}"
+            ;;
+        esac
+
+        emit_out runner-os "${RUNNER_OS}"
+
+        # ---- arch mapping ---------------------------------------------------
+        case "${RUNNER_ARCH}" in
+          X64)
+            emit_out android-sdk-arch      "x86_64"
+            emit_out android-emulator-arch "x86_64"
+            ;;
+          ARM64)
+            emit_out android-sdk-arch      "aarch64"
+            emit_out android-emulator-arch "arm64-v8a"
+            ;;
+          *)
+            abort "Unsupported architecture: ${RUNNER_ARCH}"
+            ;;
+        esac
+
+        # ---- resolve the Swift version we will actually install -------------
+        # The toolchain-release Atom feed is the source of truth for the
+        # ordered list of release/snapshot tags.
+        SWIFT_RELEASES_XML="${WORKER_TEMP}/swift-releases.xml"
+        SWIFT_VERSIONS_FILE="${WORKER_TEMP}/swift-versions.txt"
+        curl -fsSL --retry 8 --retry-connrefused \
+             https://github.com/skiptools/swift-android-toolchain/releases.atom \
+             --output "${SWIFT_RELEASES_XML}"
+
+        # extract version strings: pull <title>…</title>, strip the tags, keep
+        # entries that start with a digit, and sort by reverse numeric order.
+        grep '<title>' "${SWIFT_RELEASES_XML}" \
+          | cut -f2 -d'>' | cut -f1 -d'<' \
+          | grep '^[0-9]' \
+          | sort -rn > "${SWIFT_VERSIONS_FILE}"
+
+        SWIFT_API_INSTALL_ROOT="https://www.swift.org/api/v1/install"
+        SWIFT_VERSION="${REQUESTED_SWIFT_VERSION}"
+
+        # match aliases like "latest", "latest-6.2", "snapshot", "nightly-*",
+        # explicit DEVELOPMENT-SNAPSHOT strings, or version prefixes like 6.2.x.
+        if [[ "${SWIFT_VERSION}" == "latest" ]]; then
+          SWIFT_VERSION=$(curl -fsSL https://www.swift.org/api/v1/install/releases.json | jq -r '.[-1].name')
+
+        elif [[ "${SWIFT_VERSION}" == "latest-6.2" ]]; then
+          # newest non-snapshot release from the atom feed
+          SWIFT_VERSION=$(grep -v -- '-SNAPSHOT' "${SWIFT_VERSIONS_FILE}" | head -n 1 || true)
+
+        elif [[ "${SWIFT_VERSION}" == "snapshot" ]]; then
+          # newest snapshot from the atom feed
+          SWIFT_VERSION=$(grep -- '-SNAPSHOT'   "${SWIFT_VERSIONS_FILE}" | head -n 1 || true)
+
+        elif [[ "${SWIFT_VERSION}" == nightly-* ]]; then
+          note "Checking nightly build for: ${SWIFT_VERSION}"
+          nightly_version="${SWIFT_VERSION#nightly-}"
+
+          if [[ "${nightly_version}" == "main" ]]; then
+            SWIFT_BRANCH_GUESS="development"
+          else
+            SWIFT_BRANCH_GUESS="swift-${nightly_version}-branch"
+          fi
+
+          sdk_name="android"
+          sdk_json=$(curl -fsSL --retry 8 --retry-connrefused \
+            "${SWIFT_API_INSTALL_ROOT}/dev/${nightly_version}/${sdk_name}-sdk.json")
+          snapshot_tag=$(jq -r '.[0].dir'      <<<"${sdk_json}")
+          snapshot_dl=$( jq -r '.[0].download' <<<"${sdk_json}")
+          checksum=$(    jq -r '.[0].checksum' <<<"${sdk_json}")
+          : "${snapshot_dl}"  # currently unused, but parsed for parity
+
+          if [[ -z "${checksum}" || "${checksum}" == "null" ]]; then
+            abort "No checksum found for ${sdk_name}-sdk snapshot"
+          fi
+
+          note "Found ${sdk_name}-sdk checksum: ${checksum:0:12}..."
+          # strip the leading "swift-" — we re-prepend it as SWIFT_VERSION_ID below
+          SWIFT_VERSION="${snapshot_tag#swift-}"
+
+        elif [[ "${SWIFT_VERSION}" == *-DEVELOPMENT-SNAPSHOT-* || "${SWIFT_VERSION}" == DEVELOPMENT-SNAPSHOT-* ]]; then
+          # take explicit dev snapshots verbatim — don't try to resolve them
+          note "Using explicit development snapshot: ${SWIFT_VERSION}"
+
+        elif [[ "${SWIFT_VERSION}" == 6.2* ]]; then
+          # narrow to released 6.2.x lines (avoid the SNAPSHOT entries)
+          SWIFT_VERSION=$(grep -v -- '-SNAPSHOT' "${SWIFT_VERSIONS_FILE}" \
+                          | grep -- "^${SWIFT_VERSION}" \
+                          | head -n 1 || true)
+        fi
+
+        if [[ -z "${SWIFT_VERSION}" ]]; then
+          echo "::error::Could not find any swift version matching: ${REQUESTED_SWIFT_VERSION} in: $(cat "${SWIFT_VERSIONS_FILE}")"
+          exit 1
+        fi
+
+        echo "SWIFT_VERSION: ${SWIFT_VERSION}"
+        emit_out swift-version "${SWIFT_VERSION}"
+
+        # SWIFT_VERSION_ID = the basename of the host toolchain artifact.
+        # Plain semvers (e.g. "6.0.3") get "-RELEASE" appended; pre-release
+        # strings (anything containing a dash) are taken as-is.
+        if [[ "${SWIFT_VERSION}" == *-* ]]; then
+          SWIFT_VERSION_ID="swift-${SWIFT_VERSION}"
+        else
+          SWIFT_VERSION_ID="swift-${SWIFT_VERSION}-RELEASE"
+        fi
+        echo "SWIFT_VERSION_ID: ${SWIFT_VERSION_ID}"
+        emit_out swift-id "${SWIFT_VERSION_ID}"
+
+        # ---- swift-branch resolution ----------------------------------------
+        SWIFT_BRANCH="${REQUESTED_SWIFT_BRANCH}"
+        if [[ -z "${SWIFT_BRANCH}" ]]; then
+          case "${SWIFT_VERSION_ID}" in
+            *-RELEASE)
+              SWIFT_BRANCH="swift-${SWIFT_VERSION}-release"
+              ;;
+            swift-DEVELOPMENT-*)
+              SWIFT_BRANCH="development"
+              ;;
+            *)
+              # e.g. "6.1-DEVELOPMENT-SNAPSHOT-2025-03-07-a" -> "swift-6.1-branch"
+              BASE_VERSION="${SWIFT_VERSION%%-*}"
+              SWIFT_BRANCH="swift-${BASE_VERSION}-branch"
+              ;;
+          esac
+        fi
+        echo "SWIFT_BRANCH: ${SWIFT_BRANCH}"
+        emit_out swift-branch "${SWIFT_BRANCH}"
+
+        # ---- Android NDK selection ------------------------------------------
+        NDK_VERSION="${REQUESTED_NDK_VERSION}"
+        if [[ "${NDK_VERSION}" == "latest" ]]; then
+          # use the runner's "latest" NDK if present, otherwise fall back to default
+          emit_env ANDROID_NDK_HOME "${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME}}"
+        elif [[ -n "${NDK_VERSION}" ]]; then
+          # accept "27", "27.0", "27.2.12479018", etc.; pick the newest match
+          NDK_PARENT="$(dirname "${ANDROID_NDK_HOME}")"
+          NDK_MATCH=$(ls -rd "${NDK_PARENT}/${NDK_VERSION}"* | head -n 1)
+          emit_env ANDROID_NDK_HOME "${NDK_MATCH}"
+        fi
+
+        # see https://github.com/finagolfin/swift-android-sdk/issues/207
+        if [[ "${SWIFT_VERSION_ID}" != swift-6.0* ]]; then
+          emit_env ANDROID_NDK_ROOT ""
+        fi
+
+    - name: Cache Swift ${{ steps.setup.outputs.swift-version }} Host Toolchain
+      uses: actions/cache@v5
+      id: cache-swift
+      if: ${{ inputs.installed-swift == '' }}
+      with:
+        path: ${{ runner.temp }}/swift-download
+        key: "swift-${{ steps.setup.outputs.swift-version }}-${{ steps.setup.outputs.osid }}"
+
+    - name: Download Swift Host Toolchain
+      if: ${{ steps.cache-swift.outputs.cache-hit != 'true' && inputs.installed-swift == '' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        DOWNLOAD_DIR="${{ runner.temp }}/swift-download"
+        mkdir -p "${DOWNLOAD_DIR}"
+        cd "${DOWNLOAD_DIR}"
+
+        BRANCH="${{ steps.setup.outputs.swift-branch }}"
+        SWIFT_ID="${{ steps.setup.outputs.swift-id }}"
+        OS_PAIR="${{ steps.setup.outputs.osidpair }}"
+        OS_ID="${{ steps.setup.outputs.osid }}"
+        BASE_URL="https://download.swift.org/${BRANCH}"
+
+        case "${RUNNER_OS}" in
+          Linux)
+            HOST_TOOLCHAIN_URL="${BASE_URL}/${OS_ID}/${SWIFT_ID}/${SWIFT_ID}-${OS_PAIR}.tar.gz"
+            echo "HOST_TOOLCHAIN_URL: ${HOST_TOOLCHAIN_URL}"
+            curl -fsSL --retry 8 --retry-connrefused "${HOST_TOOLCHAIN_URL}" --output swift.tar.gz
+            ;;
+          macOS)
+            HOST_TOOLCHAIN_URL="${BASE_URL}/xcode/${SWIFT_ID}/${SWIFT_ID}-osx.pkg"
+            echo "HOST_TOOLCHAIN_URL: ${HOST_TOOLCHAIN_URL}"
+            curl -fsSL --retry 8 --retry-connrefused "${HOST_TOOLCHAIN_URL}" --output swift.pkg
+            ;;
+          *)
+            echo "::error::Unsupported platform: ${RUNNER_OS}"
+            exit 1
+            ;;
+        esac
+
+    - name: Install Swift Host Toolchain
+      if: ${{ inputs.installed-swift == '' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "${{ runner.temp }}/swift-download"
+        SWIFT_ID="${{ steps.setup.outputs.swift-id }}"
+
+        case "${RUNNER_OS}" in
+          Linux)
+            # respect XDG_CONFIG_HOME when defined, else fall back to ~/.swiftpm
+            if [[ -d "${XDG_CONFIG_HOME:-}" ]]; then
+              TOOLCHAINS_HOME="${XDG_CONFIG_HOME}/swiftpm/toolchains"
+            else
+              TOOLCHAINS_HOME="${HOME}/.swiftpm/toolchains"
+            fi
+            TARGET_DIR="${TOOLCHAINS_HOME}/${SWIFT_ID}"
+            mkdir -p "${TARGET_DIR}"
+            tar -xzf swift.tar.gz -C "${TARGET_DIR}" --strip 1
+            SWIFT_INSTALLATION="${TARGET_DIR}/usr"
+            ;;
+          macOS)
+            /usr/sbin/installer -pkg swift.pkg -target CurrentUserHomeDirectory
+            SWIFT_INSTALLATION="${HOME}/Library/Developer/Toolchains/${SWIFT_ID}.xctoolchain/usr"
+            ;;
+          *)
+            echo "::error::Unsupported platform: ${RUNNER_OS}"
+            exit 1
+            ;;
+        esac
+
+        printf 'SWIFT_INSTALLATION=%s\n' "${SWIFT_INSTALLATION}" >> "$GITHUB_ENV"
+        printf 'swiftroot=%s\n'          "${SWIFT_INSTALLATION}" >> "$GITHUB_OUTPUT"
+
+    - name: Setup Swift Host Toolchain
+      if: ${{ inputs.installed-swift != '' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        SWIFT_INSTALLATION="${{ inputs.installed-swift }}/usr"
+        printf 'SWIFT_INSTALLATION=%s\n' "${SWIFT_INSTALLATION}" >> "$GITHUB_ENV"
+        printf 'swiftroot=%s\n'          "${SWIFT_INSTALLATION}" >> "$GITHUB_OUTPUT"
+
+    - name: Install Swift Android SDK
+      id: install
+      shell: bash
+      run: |
+        set +x
+        set -eo pipefail
+
+        BRANCH="${{ steps.setup.outputs.swift-branch }}"
+        SWIFT_ID="${{ steps.setup.outputs.swift-id }}"
+        ARCH_ID="${{ steps.setup.outputs.android-sdk-arch }}"
+        BASE_URL="https://download.swift.org/${BRANCH}"
+
+        # location SwiftPM puts installed swift-sdks at
+        case "${RUNNER_OS}" in
+          Linux)  SWIFT_SDK_ROOT="${HOME}/.config/swiftpm/swift-sdks" ;;
+          macOS)  SWIFT_SDK_ROOT="${HOME}/.swiftpm/swift-sdks" ;;
+          *)      echo "::error::Unsupported platform for SDK: ${RUNNER_OS}"; exit 1 ;;
+        esac
+
+        INSTALLED_SDK="${{ inputs.installed-sdk }}"
+        CUSTOM_SDK_URL="${{ inputs.custom-sdk-url }}"
+        CUSTOM_SDK_ID="${{ inputs.custom-sdk-id }}"
+
+        if [[ -n "${INSTALLED_SDK}" && -z "${CUSTOM_SDK_URL}" ]]; then
+          # SDK is already installed on the runner
+          SWIFT_SDK_TARGET="${INSTALLED_SDK}"
+          echo "SWIFT_SDK_TARGET=${SWIFT_SDK_TARGET}" >> "$GITHUB_ENV"
+          SWIFT_SDK_ARTIFACTBUNDLE=$(ls -1drt "${SWIFT_SDK_ROOT}"/*.artifactbundle | tail -n 1)
+        else
+          WORK_DIR="${RUNNER_TEMP}/swift-android-toolchain"
+          mkdir -p "${WORK_DIR}"
+          cd "${WORK_DIR}"
+
+          ANDROID_SDK_URL="${CUSTOM_SDK_URL}"
+
+          if [[ -n "${ANDROID_SDK_URL}" ]]; then
+            # custom user-provided SDK
+            if [[ -z "${INSTALLED_SDK}" || -z "${CUSTOM_SDK_ID}" ]]; then
+              echo "::error::Options 'custom-sdk-id' and 'installed-sdk' must be provided when downloading custom SDK."
+              exit 1
+            fi
+            SWIFT_SDK_TARGET="${INSTALLED_SDK}"
+            echo "SWIFT_SDK_TARGET=${SWIFT_SDK_TARGET}" >> "$GITHUB_ENV"
+            SWIFT_SDK_ID="${CUSTOM_SDK_ID}"
+            SWIFT_SDK_ARTIFACT="${SWIFT_SDK_ID}"
+          else
+            # derive the official artifactbundle name from the toolchain id
+            # TODO: identify the version automatically
+            SWIFT_SDK_VERSION="0.1"
+            SWIFT_SDK_ID="${SWIFT_ID}"
+
+            COMPILE_LEVEL_EXPLICIT="${{ inputs.compile-sdk-api-level }}"
+            if [[ -n "${COMPILE_LEVEL_EXPLICIT}" ]]; then
+              SWIFT_SDK_ANROID_API="${COMPILE_LEVEL_EXPLICIT}"
+            else
+              SWIFT_SDK_ANROID_API="${{ inputs.android-api-level }}"
+            fi
+
+            # default 6.2+ naming
+            SWIFT_SDK_ARTIFACT="${SWIFT_SDK_ID}_android"
+            ANDROID_SDK_URL="${BASE_URL}/android-sdk/${SWIFT_SDK_ID}/${SWIFT_SDK_ARTIFACT}.artifactbundle.tar.gz"
+
+            # 6.0.x / 6.1 (but NOT 6.1.1+) — uses skiptools toolchain releases + API in artifact name
+            if [[ "${SWIFT_SDK_ID}" == *"-6.0"* || "${SWIFT_SDK_ID}" == *"-6.1-"* ]]; then
+              # SDK 6.0/6.1 minimum target is API 24
+              if [[ -z "${COMPILE_LEVEL_EXPLICIT}" ]]; then
+                SWIFT_SDK_ANROID_API="24"
+              fi
+              SWIFT_SDK_ARTIFACT="${SWIFT_SDK_ID}-android-${SWIFT_SDK_ANROID_API}-${SWIFT_SDK_VERSION}"
+              ANDROID_SDK_URL="https://github.com/skiptools/swift-android-toolchain/releases/download/${{ steps.setup.outputs.swift-version }}/${SWIFT_SDK_ARTIFACT}.artifactbundle.tar.gz"
+            elif [[ "${SWIFT_SDK_ID}" == *"-6.1."* || "${SWIFT_SDK_ID}" == *"-6.2"* ]]; then
+              # 6.1.1+ / 6.2.x — API no longer encoded in name
+              if [[ "${SWIFT_SDK_ID}" == *"-6.2.3"* ]]; then
+                SWIFT_SDK_ARTIFACT="${SWIFT_SDK_ID}_android"
+              else
+                SWIFT_SDK_ARTIFACT="${SWIFT_SDK_ID}-android-${SWIFT_SDK_VERSION}"
+              fi
+              ANDROID_SDK_URL="https://github.com/skiptools/swift-android-toolchain/releases/download/${{ steps.setup.outputs.swift-version }}/${SWIFT_SDK_ARTIFACT}.artifactbundle.tar.gz"
+            fi
+
+            SWIFT_SDK_TARGET="${ARCH_ID}-unknown-linux-android${SWIFT_SDK_ANROID_API}"
+            echo "SWIFT_SDK_TARGET=${SWIFT_SDK_TARGET}" >> "$GITHUB_ENV"
+          fi
+
+          echo "ANDROID_SDK_URL: ${ANDROID_SDK_URL}"
+          curl -fsSL --retry 8 --retry-connrefused "${ANDROID_SDK_URL}" \
+               --output "${SWIFT_SDK_ARTIFACT}.artifactbundle.tar.gz"
+
+          # If a prior step on this runner already installed the bundle (re-run
+          # of the same workflow), skip re-installing it.
+          "${SWIFT_INSTALLATION}/bin/swift" sdk configure --show-configuration \
+              "${SWIFT_SDK_ARTIFACT}" "${SWIFT_SDK_TARGET}" &>/dev/null \
+            || "${SWIFT_INSTALLATION}/bin/swift" sdk install \
+                  "${SWIFT_SDK_ARTIFACT}.artifactbundle.tar.gz"
+
+          # Nightly-main quirk: the on-disk artifactbundle uses
+          # "swift-…-a-android.artifactbundle" while the tarball is named with
+          # "_android". Try both spellings for the configure check.
+          SWIFT_SDK_ARTIFACT_ALT="${SWIFT_SDK_ARTIFACT//_android/-android}"
+          echo "${SWIFT_INSTALLATION}/bin/swift sdk configure --show-configuration ${SWIFT_SDK_ARTIFACT} ${SWIFT_SDK_TARGET} || ${SWIFT_INSTALLATION}/bin/swift sdk configure --show-configuration ${SWIFT_SDK_ARTIFACT_ALT} ${SWIFT_SDK_TARGET}"
+          "${SWIFT_INSTALLATION}/bin/swift" sdk configure --show-configuration "${SWIFT_SDK_ARTIFACT}"     "${SWIFT_SDK_TARGET}" \
+            || "${SWIFT_INSTALLATION}/bin/swift" sdk configure --show-configuration "${SWIFT_SDK_ARTIFACT_ALT}" "${SWIFT_SDK_TARGET}"
+
+          SWIFT_SDK_ARTIFACTBUNDLE="${SWIFT_SDK_ROOT}/${SWIFT_SDK_ARTIFACT}.artifactbundle"
+          if [[ ! -d "${SWIFT_SDK_ARTIFACTBUNDLE}" ]]; then
+            SWIFT_SDK_ARTIFACTBUNDLE="${SWIFT_SDK_ROOT}/${SWIFT_SDK_ARTIFACT_ALT}.artifactbundle"
+            if [[ ! -d "${SWIFT_SDK_ARTIFACTBUNDLE}" ]]; then
+              echo "::error::artifactbundle not found at ${SWIFT_SDK_ARTIFACTBUNDLE}"
+              exit 1
+            fi
+          fi
+        fi
+
+        # ---- derive paths from the bundle's info.json / swift-sdk.json ----
+        SWIFT_SDK_ARTIFACT_ID=$(jq -r '.artifacts[] | .variants[0].path' \
+                                  "${SWIFT_SDK_ARTIFACTBUNDLE}/info.json")
+        SWIFT_ARTIFACTBUNDLE_ROOT="${SWIFT_SDK_ARTIFACTBUNDLE}/${SWIFT_SDK_ARTIFACT_ID}"
+
+        SWIFT_SDK_SETUP="${SWIFT_ARTIFACTBUNDLE_ROOT}/scripts/setup-android-sdk.sh"
+        if [[ -x "${SWIFT_SDK_SETUP}" ]]; then
+          echo "Running SDK setup script at ${SWIFT_SDK_SETUP}"
+          "${SWIFT_SDK_SETUP}"
+        else
+          echo "No SDK setup script to run in ${SWIFT_ARTIFACTBUNDLE_ROOT}/scripts"
+        fi
+
+        SWIFT_SDK_JSON="${SWIFT_ARTIFACTBUNDLE_ROOT}/swift-sdk.json"
+
+        # sdkRootPath (first listed triple)
+        SWIFT_SDK_ROOT_PATH=$(jq -r '.targetTriples[] | .sdkRootPath' "${SWIFT_SDK_JSON}" | head -n 1)
+        SWIFT_ARTIFACTBUNDLE_SDK_ROOT_PATH="${SWIFT_ARTIFACTBUNDLE_ROOT}/${SWIFT_SDK_ROOT_PATH}"
+        echo "SWIFT_ARTIFACTBUNDLE_SDK_ROOT_PATH=${SWIFT_ARTIFACTBUNDLE_SDK_ROOT_PATH}" >> "$GITHUB_ENV"
+
+        # swiftResourcesPath — must match the host architecture
+        RES_ARCH_PREFIX="${ARCH_ID}"
+        SWIFT_RESOURCES_ROOT_PATH=$(jq -r --arg pfx "${RES_ARCH_PREFIX}" \
+          '.targetTriples | to_entries[] | select(.key | startswith($pfx)) | .value.swiftResourcesPath' \
+          "${SWIFT_SDK_JSON}" | head -n 1)
+        SWIFT_ARTIFACTBUNDLE_RESOURCES_ROOT_PATH="${SWIFT_ARTIFACTBUNDLE_ROOT}/${SWIFT_RESOURCES_ROOT_PATH}"
+        echo "SWIFT_ARTIFACTBUNDLE_RESOURCES_ROOT_PATH=${SWIFT_ARTIFACTBUNDLE_RESOURCES_ROOT_PATH}" >> "$GITHUB_ENV"
+
+        # plugin-path works around https://github.com/swiftlang/swift-package-manager/issues/8362
+        SWIFTCMD="TARGET_OS_ANDROID=1 SKIP_BRIDGE=1 ${SWIFT_INSTALLATION}/bin/swift build --swift-sdk ${SWIFT_SDK_TARGET} -Xswiftc -plugin-path -Xswiftc ${SWIFT_INSTALLATION}/lib/swift/host/plugins/testing -Xswiftc -DTARGET_OS_ANDROID -Xswiftc -DSKIP_BRIDGE ${{ inputs.swift-build-flags }}"
+        echo "swiftcmd=${SWIFTCMD}"      >> "$GITHUB_OUTPUT"
+        echo "swift-sdk=${SWIFT_SDK_TARGET}" >> "$GITHUB_OUTPUT"
+
+    - name: Check Swift Version
+      shell: bash
+      run: |
+        echo "Swift Command: ${{ steps.install.outputs.swiftcmd }}"
+        ${{ steps.install.outputs.swiftcmd }} --version
+
+    - name: Build Swift Package with Android SDK
+      id: build
+      if: ${{ inputs.build-package == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.package-path }}
+      run: |
+        set -euo pipefail
+
+        BUILD_TESTS_FLAG=""
+        [[ "${{ inputs.build-tests }}" == "true" ]] && BUILD_TESTS_FLAG="--build-tests"
+
+        ${{ steps.install.outputs.swiftcmd }} -c ${{ inputs.swift-configuration }} ${BUILD_TESTS_FLAG}
+
+        # capture the same build's bin-path for downstream packaging
+        BUILD_DIR=$(${{ steps.install.outputs.swiftcmd }} -c ${{ inputs.swift-configuration }} ${BUILD_TESTS_FLAG} --show-bin-path)
+        echo "build-dir=${BUILD_DIR}" >> "$GITHUB_OUTPUT"
+
+    - name: Free up disk space
+      if: ${{ inputs.free-disk-space == 'true' && inputs.run-tests == 'true' }}
+      shell: bash
+      run: sudo rm -rf /Applications/Xcode_1[4567]*.app /opt/microsoft /opt/google /opt/az /usr/share/miniconda /usr/share/az* /usr/share/glade* /usr/local/share/chromium /usr/local/share/powershell /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/julia* /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+
+    - name: Prepare Android Emulator Test Script
+      id: test-script
+      if: ${{ inputs.run-tests == 'true' && inputs.build-tests == 'true' && inputs.build-package == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.package-path }}
+      run: |
+        set -eo pipefail
+
+        # macOS-on-ARM cannot run nested virtualization -> emulator dies with
+        # HV_UNSUPPORTED. Don't hard-fail because self-hosted runners may
+        # actually be capable.
+        if [[ "${RUNNER_ARCH}" == "ARM64" && "${RUNNER_OS}" == "macOS" ]]; then
+          echo "::warning::Cannot run tests on ARM64 macOS due to HVF error: HV_UNSUPPORTED. See https://github.com/ReactiveCircus/android-emulator-runner/issues/350#issuecomment-2030065889"
+        fi
+
+        TEST_HOST_FOLDER="${{ inputs.android-emulator-test-folder }}"
+        REMOTE_FOLDER=$(dirname  "${TEST_HOST_FOLDER}")
+        TEST_BASE_FOLDER=$(basename "${TEST_HOST_FOLDER}")
+        BUILD_DIR="${{ steps.build.outputs.build-dir }}"
+
+        PACK_DIR="${BUILD_DIR}/${TEST_BASE_FOLDER}"
+        mkdir -p "${PACK_DIR}"
+
+        shopt -s nullglob
+
+        # detect old-style .xctest vs new-style *-test-runner binaries
+        xctest_files=("${BUILD_DIR}"/*.xctest)
+        test_runner_files=("${BUILD_DIR}"/*-test-runner)
+        if (( ${#xctest_files[@]} )); then
+          TEST_RUNNER_SUFFIX=".xctest"
+        else
+          TEST_RUNNER_SUFFIX="-test-runner"
+        fi
+
+        # gather test binaries
+        cp -va "${BUILD_DIR}"/*"${TEST_RUNNER_SUFFIX}" "${PACK_DIR}"
+
+        # optional dependent libraries / resource bundles
+        cp -va  "${BUILD_DIR}"/*.so        "${PACK_DIR}" || true
+        cp -vaf "${BUILD_DIR}"/*.resources "${PACK_DIR}" || true
+
+        # SDK runtime libraries — locations differ between Swift versions
+        #   6.0.2 : per-API folders
+        cp -vaf "${SWIFT_ARTIFACTBUNDLE_SDK_ROOT_PATH}/usr/lib/${{ steps.setup.outputs.android-sdk-arch }}-linux-android/24/lib"*.so "${PACK_DIR}" || true
+        #   6.0.3 : flat under arch folder
+        cp -vaf "${SWIFT_ARTIFACTBUNDLE_SDK_ROOT_PATH}/usr/lib/${{ steps.setup.outputs.android-sdk-arch }}-linux-android/lib"*.so    "${PACK_DIR}" || true
+        #   6.2+  : in the resources root
+        cp -vaf "${SWIFT_ARTIFACTBUNDLE_RESOURCES_ROOT_PATH}/android/lib"*.so                                                       "${PACK_DIR}" || true
+
+        # don't ship libs that are already part of the Android system image
+        rm -v "${PACK_DIR}"/lib{c,dl,log,m,z,c++}.so 2>/dev/null || true
+
+        # user-supplied resources
+        if [[ -n "${{ inputs.copy-files }}" ]]; then
+          cp -vaf ${{ inputs.copy-files }} "${PACK_DIR}"
+        fi
+
+        # --- generate the in-emulator runner script ------------------------
+        SCRIPT_FILE="run-android-tests.sh"
+        cd "${BUILD_DIR}"
+
+        {
+          echo '#!/bin/sh -ex'
+          echo "cd ${BUILD_DIR}"
+          echo "adb push ${TEST_BASE_FOLDER} ${REMOTE_FOLDER}"
+        } > "${SCRIPT_FILE}"
+
+        API_LEVEL="${{ inputs.android-api-level }}"
+        SWIFT_VERSION_RUN="${{ steps.setup.outputs.swift-version }}"
+
+        for XCTEST in ${TEST_BASE_FOLDER}/*${TEST_RUNNER_SUFFIX}; do
+          XCTEST_BASE=$(basename "${XCTEST}")
+          TEST_CMD="${{ inputs.test-env }} ./${XCTEST_BASE} ${{ inputs.swift-test-flags }}"
+
+          # API <= 23 has no DT_RUNPATH support; force LD_LIBRARY_PATH
+          if [[ "${API_LEVEL}" -le 23 ]]; then
+            TEST_CMD="LD_LIBRARY_PATH=./ ${TEST_CMD}"
+          fi
+
+          TEST_SHELL="cd ${REMOTE_FOLDER}/${TEST_BASE_FOLDER} && ${TEST_CMD}"
+
+          # 6.1+: also try swift-testing library when the binary links to it.
+          # EXIT_NO_TESTS_FOUND (69) is treated as success.
+          if [[ "${SWIFT_VERSION_RUN}" != 6.0* ]]; then
+            patchelf --print-needed "${XCTEST}" | grep libTesting.so \
+              && TEST_SHELL="${TEST_SHELL} && ${TEST_CMD} --testing-library swift-testing && [ \$? -eq 0 ] || [ \$? -eq 69 ]" \
+              || true
+          fi
+
+          if [[ "${API_LEVEL}" -le 23 ]]; then
+            # On API 23 `adb shell` does not propagate the child exit code, so
+            # write it to a file on-device and read it back here.
+            REMOTE_RC_FILE="${REMOTE_FOLDER}/${TEST_BASE_FOLDER}/xctest-exit-code"
+            echo "adb shell '${TEST_SHELL}; echo \$? > ${REMOTE_RC_FILE}'" >> "${SCRIPT_FILE}"
+            echo "RC=\$(adb shell cat ${REMOTE_RC_FILE} | tr -d '\\r')"     >> "${SCRIPT_FILE}"
+            echo "[ \"\$RC\" = 0 ] || { echo \"::error::Android tests failed (exit \$RC)\"; exit 1; }" >> "${SCRIPT_FILE}"
+          else
+            echo "adb shell '${TEST_SHELL}'" >> "${SCRIPT_FILE}"
+          fi
+        done
+
+        # stop the emulator cleanly when we are done
+        # https://github.com/ReactiveCircus/android-emulator-runner/issues/385#issuecomment-2492035091
+        echo 'killall -INT crashpad_handler || true' >> "${SCRIPT_FILE}"
+
+        cat "${SCRIPT_FILE}"
+        chmod +x "${SCRIPT_FILE}"
+
+        echo "test-runner-script=${PWD}/${SCRIPT_FILE}" >> "$GITHUB_OUTPUT"
+
+    - name: Setup Android Emulator Cache
+      if: ${{ inputs.run-tests == 'true' && inputs.build-tests == 'true' && inputs.build-package == 'true' }}
+      uses: actions/cache@v5
+      id: avd-cache
+      with:
+        path: |
+          ~/.android/avd/*
+          ~/.android/adb*
+        key: 'avd-${{ inputs.android-profile }}_${{ inputs.android-channel }}_${{ inputs.android-target }}_${{ inputs.android-api-level }}-${{ steps.setup.outputs.runner-os }}-${{ steps.setup.outputs.android-emulator-arch }}'
+
+    - name: Create Android Emulator Cache
+      if: ${{ inputs.run-tests == 'true' && inputs.build-tests == 'true' && inputs.build-package == 'true' && steps.avd-cache.outputs.cache-hit != 'true' }}
+      uses: step-security/android-emulator-runner@release
+      with:
+        force-avd-creation: false
+        api-level: ${{ inputs.android-api-level }}
+        target: ${{ inputs.android-target }}
+        channel: ${{ inputs.android-channel }}
+        profile: ${{ inputs.android-profile }}
+        cores: ${{ inputs.android-cores }}
+        emulator-boot-timeout: ${{ inputs.android-emulator-boot-timeout }}
+        emulator-options: ${{ inputs.android-emulator-options }}
+        arch: ${{ steps.setup.outputs.android-emulator-arch }}
+        disable-animations: false
+        working-directory: ${{ inputs.package-path }}/.build
+        script: echo "Generated Android Emulator snapshot for caching."
+
+    - name: Run Tests on Android emulator
+      if: ${{ inputs.run-tests == 'true' && inputs.build-tests == 'true' && inputs.build-package == 'true' }}
+      uses: step-security/android-emulator-runner@release
+      with:
+        force-avd-creation: false
+        api-level: ${{ inputs.android-api-level }}
+        target: ${{ inputs.android-target }}
+        channel: ${{ inputs.android-channel }}
+        profile: ${{ inputs.android-profile }}
+        cores: ${{ inputs.android-cores }}
+        emulator-boot-timeout: ${{ inputs.android-emulator-boot-timeout }}
+        emulator-options: -no-snapshot-save ${{ inputs.android-emulator-options }}
+        arch: ${{ steps.setup.outputs.android-emulator-arch }}
+        disable-animations: true
+        working-directory: ${{ inputs.package-path }}/.build
+        script: ${{ steps.test-script.outputs.test-runner-script }}

@@ -1,0 +1,163 @@
+name: swift-android-action ci
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build + test a real third-party package (apple/swift-algorithms) on the
+  # full matrix of {OS, Swift version, NDK version}. On macOS ARM the emulator
+  # cannot run, so we set run-tests=false for that combination only.
+  # ---------------------------------------------------------------------------
+  tests:
+    name: tests (${{ matrix.os }} / swift ${{ matrix.swift-version }} / ndk ${{ matrix.ndk-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Dependabot PRs only exercise one OS / Swift / NDK combination to keep
+        # the matrix cheap; regular CI fans out across the full grid.
+        os: ${{ github.actor == 'dependabot[bot]' && fromJSON('["ubuntu-24.04"]') || fromJSON('["ubuntu-24.04", "macos-15-intel"]') }}
+        swift-version: ${{ github.actor == 'dependabot[bot]' && fromJSON('["6.3"]') || fromJSON('["6.2", "6.3", "nightly-6.3", "nightly-main"]') }}
+        ndk-version: ${{ github.actor == 'dependabot[bot]' && fromJSON('["27"]') || fromJSON('["27", "latest"]') }}
+    steps:
+      - name: Check out this action
+        uses: actions/checkout@v6
+        with:
+          path: swift-android-action
+
+      - name: Check out apple/swift-algorithms
+        uses: actions/checkout@v6
+        with:
+          repository: apple/swift-algorithms
+          path: apple/swift-algorithms
+
+      - name: Build & test apple/swift-algorithms on Android
+        uses: ./swift-android-action/
+        with:
+          package-path: apple/swift-algorithms
+          swift-version: ${{ matrix.swift-version }}
+          ndk-version: ${{ matrix.ndk-version }}
+          free-disk-space: true
+          # macOS-on-ARM can't nest-virtualize the emulator -> only build there
+          run-tests: ${{ env.RUNNER_ARCH != 'ARM64' }}
+
+  # ---------------------------------------------------------------------------
+  # Install only the toolchain (build-package=false) and then drive a *separate*
+  # package (swiftlang/swift-markdown) using the swift-build output, verifying
+  # both debug and release configurations.
+  # ---------------------------------------------------------------------------
+  setup:
+    name: setup-only (${{ matrix.os }} / swift ${{ matrix.swift-version }} / ndk ${{ matrix.ndk-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Same dependabot-shrinks-the-matrix pattern as the `tests` job.
+        os: ${{ github.actor == 'dependabot[bot]' && fromJSON('["ubuntu-24.04"]') || fromJSON('["ubuntu-24.04", "macos-26"]') }}
+        swift-version: ${{ github.actor == 'dependabot[bot]' && fromJSON('["6.3"]') || fromJSON('["6.2", "6.3", "nightly-6.3", "nightly-main"]') }}
+        ndk-version: ${{ github.actor == 'dependabot[bot]' && fromJSON('["27"]') || fromJSON('["27", "latest"]') }}
+    steps:
+      - name: Check out this action
+        uses: actions/checkout@v6
+        with:
+          path: swift-android-action
+
+      - name: Install Swift toolchain only
+        id: setup-toolchain
+        uses: ./swift-android-action/
+        with:
+          # skip package build — we just want the toolchain/SDK staged
+          build-package: false
+          swift-version: ${{ matrix.swift-version }}
+          ndk-version: ${{ matrix.ndk-version }}
+
+      - name: Check out swiftlang/swift-markdown
+        uses: actions/checkout@v6
+        with:
+          repository: swiftlang/swift-markdown
+          path: swiftlang/swift-markdown
+
+      - name: Build swift-markdown (debug + release) using the installed toolchain
+        working-directory: swiftlang/swift-markdown
+        env:
+          SWIFT_BUILD_CMD: ${{ steps.setup-toolchain.outputs.swift-build }}
+        run: |
+          set -euo pipefail
+          echo "SWIFT COMMAND: ${SWIFT_BUILD_CMD}"
+
+          for CONFIG in debug release; do
+            echo "::group::swift build -c ${CONFIG}"
+            ${SWIFT_BUILD_CMD} -c "${CONFIG}"
+            ls -lah ".build/${CONFIG}/"
+            echo "::endgroup::"
+          done
+
+  # ---------------------------------------------------------------------------
+  # Generate a tiny synthetic SwiftPM package with two @available-gated tests
+  # — one for the current matrix API level, one for the next API level — and
+  # confirm only the first one is dispatched on each emulator API level.
+  # ---------------------------------------------------------------------------
+  api-levels:
+    name: api-level ${{ matrix.android-api-level }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # On dependabot PRs only check API 28; full CI sweeps API 23-35.
+        android-api-level: ${{ github.actor == 'dependabot[bot]' && fromJSON('[28]') || fromJSON('[23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35]') }}
+    steps:
+      - name: Check out this action
+        uses: actions/checkout@v6
+        with:
+          path: swift-android-action
+
+      - name: Generate ApiTest package
+        id: create-package
+        shell: bash
+        env:
+          TARGET_API: ${{ matrix.android-api-level }}
+        run: |
+          set -euo pipefail
+
+          PKG_DIR="${RUNNER_TEMP}/ApiTest"
+          rm -rf "${PKG_DIR}"
+          mkdir -p "${PKG_DIR}"
+          cd "${PKG_DIR}"
+
+          swift package init --type library --name ApiTest
+
+          NEXT_API=$(( TARGET_API + 1 ))
+
+          # Write a fixture with two @available-gated tests: one that should
+          # run on TARGET_API, one that must NOT (gated to TARGET_API + 1).
+          cat > Tests/ApiTestTests/ApiTestTests.swift <<SWIFT_FIXTURE
+          import Testing
+
+          struct ApiTestTests {
+              @available(Android ${TARGET_API}, *)
+              @Test func availableAtTargetAPI() {
+                  #expect(Bool(true))
+              }
+
+              @available(Android ${NEXT_API}, *)
+              @Test func shouldNotRunAtHigherAPI() {
+                  #expect(Bool(false), "Test should not run on Android ${TARGET_API} (requires API ${NEXT_API}+)")
+              }
+          }
+          SWIFT_FIXTURE
+
+          cat Tests/ApiTestTests/ApiTestTests.swift
+
+          echo "package-path=${PKG_DIR}" >> "$GITHUB_OUTPUT"
+
+      - name: Run ApiTest on Android API ${{ matrix.android-api-level }}
+        uses: ./swift-android-action/
+        with:
+          package-path: ${{ steps.create-package.outputs.package-path }}
+          swift-version: nightly-main
+          android-api-level: ${{ matrix.android-api-level }}
