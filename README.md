@@ -9,11 +9,9 @@ Under the hood the action:
 1. installs a Swift host toolchain matching the requested version,
 2. installs the matching **Swift SDK for Android** (the official cross-compilation bundle from swift.org, or — for Swift 6.0/6.1 — the [pre-official bundle](https://github.com/swift-android-sdk/swift-android-sdk) maintained at [skiptools/swift-android-toolchain](https://github.com/skiptools/swift-android-toolchain)),
 3. builds your `Package.swift`,
-4. boots an Android emulator (using a step-security-maintained build of [android-emulator-runner](https://github.com/marketplace/actions/android-emulator-runner)) and runs the resulting test binaries inside it.
+4. boots an Android emulator (using the step-security-maintained [step-security/android-emulator-runner](https://github.com/step-security/android-emulator-runner)) and runs the resulting test binaries inside it.
 
 If you only need the build (no tests), set `run-tests: false` — this skips emulator boot and is dramatically faster.
-
-You can grab the action from the [GitHub Marketplace](https://github.com/marketplace/actions/swift-android-action) or wire it directly into any workflow in your repository (typically `.github/workflows/swift-ci.yml`).
 
 ---
 
@@ -123,7 +121,7 @@ Pinning a specific Swift version is just one more input:
 
 The action runs on any GitHub-hosted (or compatible self-hosted) `ubuntu-*` and `macos-*` [runner image](https://github.com/actions/runner-images).
 
-**ARM macOS caveat.** macOS-on-ARM runners (`macos-14`, `macos-15`, `macos-26`, …) cannot do the nested virtualization the Android emulator requires (see [`reactivecircus/android-emulator-runner#350`](https://github.com/ReactiveCircus/android-emulator-runner/issues/350)). On those images you must disable tests:
+**ARM macOS caveat.** macOS-on-ARM runners (`macos-14`, `macos-15`, `macos-26`, …) cannot do the nested virtualization the Android emulator. On those images you must disable tests:
 
 ```yml
 jobs:
@@ -244,7 +242,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Install Swift on Windows
-        uses: compnerd/gha-setup-swift@main
+        uses: step-security/gha-setup-swift@v0
         with:
           branch: swift-6.3-release
           tag: 6.3-RELEASE
@@ -287,8 +285,6 @@ Two fixes:
    ```
 
    See the [`action.yml`](https://github.com/step-security/swift-android-action/blob/main/action.yml) source for the exact list of folders the cleanup removes — if your job actually needs one of them, do step 1 instead.
-
-More context in [issue #11](https://github.com/step-security/swift-android-action/issues/11).
 
 ### "Wrong Swift version is being used"
 

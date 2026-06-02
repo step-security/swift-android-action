@@ -292,6 +292,7 @@ runs:
           fi
 
           note "Found ${sdk_name}-sdk checksum: ${checksum:0:12}..."
+          emit_out android-sdk-checksum "${checksum}"
           # strip the leading "swift-" — we re-prepend it as SWIFT_VERSION_ID below
           SWIFT_VERSION="${snapshot_tag#swift-}"
 
@@ -448,6 +449,8 @@ runs:
     - name: Install Swift Android SDK
       id: install
       shell: bash
+      env:
+        INPUT_SWIFT_BUILD_FLAGS: ${{ inputs.swift-build-flags }}
       run: |
         set +x
         set -eo pipefail
@@ -533,6 +536,20 @@ runs:
           curl -fsSL --retry 8 --retry-connrefused "${ANDROID_SDK_URL}" \
                --output "${SWIFT_SDK_ARTIFACT}.artifactbundle.tar.gz"
 
+          EXPECTED_SDK_CHECKSUM="${{ steps.setup.outputs.android-sdk-checksum }}"
+          if [[ -n "${EXPECTED_SDK_CHECKSUM}" && "${EXPECTED_SDK_CHECKSUM}" != "null" ]]; then
+            ACTUAL_SDK_CHECKSUM=$(shasum -a 256 "${SWIFT_SDK_ARTIFACT}.artifactbundle.tar.gz" | awk '{print $1}')
+            if [[ "${ACTUAL_SDK_CHECKSUM}" != "${EXPECTED_SDK_CHECKSUM}" ]]; then
+              echo "::warning::Android SDK checksum mismatch (continuing anyway)."
+              echo "::warning::  expected: ${EXPECTED_SDK_CHECKSUM}"
+              echo "::warning::  actual:   ${ACTUAL_SDK_CHECKSUM}"
+            else
+              echo "::notice::Android SDK checksum verified: ${ACTUAL_SDK_CHECKSUM:0:12}…"
+            fi
+          else
+            echo "::notice::No published checksum for this Android SDK release; skipping verification."
+          fi
+
           # If a prior step on this runner already installed the bundle (re-run
           # of the same workflow), skip re-installing it.
           "${SWIFT_INSTALLATION}/bin/swift" sdk configure --show-configuration \
@@ -565,7 +582,10 @@ runs:
 
         SWIFT_SDK_SETUP="${SWIFT_ARTIFACTBUNDLE_ROOT}/scripts/setup-android-sdk.sh"
         if [[ -x "${SWIFT_SDK_SETUP}" ]]; then
-          echo "Running SDK setup script at ${SWIFT_SDK_SETUP}"
+
+          SETUP_SHA=$(shasum -a 256 "${SWIFT_SDK_SETUP}" | awk '{print $1}')
+          SETUP_SIZE=$(wc -c < "${SWIFT_SDK_SETUP}" | tr -d ' ')
+          echo "::notice::Executing SDK setup script ${SWIFT_SDK_SETUP} (${SETUP_SIZE} bytes, sha256=${SETUP_SHA})"
           "${SWIFT_SDK_SETUP}"
         else
           echo "No SDK setup script to run in ${SWIFT_ARTIFACTBUNDLE_ROOT}/scripts"
@@ -586,8 +606,14 @@ runs:
         SWIFT_ARTIFACTBUNDLE_RESOURCES_ROOT_PATH="${SWIFT_ARTIFACTBUNDLE_ROOT}/${SWIFT_RESOURCES_ROOT_PATH}"
         echo "SWIFT_ARTIFACTBUNDLE_RESOURCES_ROOT_PATH=${SWIFT_ARTIFACTBUNDLE_RESOURCES_ROOT_PATH}" >> "$GITHUB_ENV"
 
+        SAFE_BUILD_FLAGS=""
+        if [[ -n "${INPUT_SWIFT_BUILD_FLAGS}" ]]; then
+          # shellcheck disable=SC2086 # intentional word-split of the input
+          SAFE_BUILD_FLAGS=$(printf '%q ' ${INPUT_SWIFT_BUILD_FLAGS})
+        fi
+
         # plugin-path works around https://github.com/swiftlang/swift-package-manager/issues/8362
-        SWIFTCMD="TARGET_OS_ANDROID=1 SKIP_BRIDGE=1 ${SWIFT_INSTALLATION}/bin/swift build --swift-sdk ${SWIFT_SDK_TARGET} -Xswiftc -plugin-path -Xswiftc ${SWIFT_INSTALLATION}/lib/swift/host/plugins/testing -Xswiftc -DTARGET_OS_ANDROID -Xswiftc -DSKIP_BRIDGE ${{ inputs.swift-build-flags }}"
+        SWIFTCMD="TARGET_OS_ANDROID=1 SKIP_BRIDGE=1 ${SWIFT_INSTALLATION}/bin/swift build --swift-sdk ${SWIFT_SDK_TARGET} -Xswiftc -plugin-path -Xswiftc ${SWIFT_INSTALLATION}/lib/swift/host/plugins/testing -Xswiftc -DTARGET_OS_ANDROID -Xswiftc -DSKIP_BRIDGE ${SAFE_BUILD_FLAGS}"
         echo "swiftcmd=${SWIFTCMD}"      >> "$GITHUB_OUTPUT"
         echo "swift-sdk=${SWIFT_SDK_TARGET}" >> "$GITHUB_OUTPUT"
 
@@ -624,6 +650,10 @@ runs:
       if: ${{ inputs.run-tests == 'true' && inputs.build-tests == 'true' && inputs.build-package == 'true' }}
       shell: bash
       working-directory: ${{ inputs.package-path }}
+      env:
+        INPUT_TEST_ENV: ${{ inputs.test-env }}
+        INPUT_SWIFT_TEST_FLAGS: ${{ inputs.swift-test-flags }}
+        INPUT_COPY_FILES: ${{ inputs.copy-files }}
       run: |
         set -eo pipefail
 
@@ -672,8 +702,8 @@ runs:
         rm -v "${PACK_DIR}"/lib{c,dl,log,m,z,c++}.so 2>/dev/null || true
 
         # user-supplied resources
-        if [[ -n "${{ inputs.copy-files }}" ]]; then
-          cp -vaf ${{ inputs.copy-files }} "${PACK_DIR}"
+        if [[ -n "${INPUT_COPY_FILES}" ]]; then
+          cp -vaf ${INPUT_COPY_FILES} "${PACK_DIR}"
         fi
 
         # --- generate the in-emulator runner script ------------------------
@@ -689,9 +719,20 @@ runs:
         API_LEVEL="${{ inputs.android-api-level }}"
         SWIFT_VERSION_RUN="${{ steps.setup.outputs.swift-version }}"
 
+        SAFE_TEST_ENV=""
+        SAFE_TEST_FLAGS=""
+        if [[ -n "${INPUT_TEST_ENV}" ]]; then
+          # shellcheck disable=SC2086 # intentional word-split into KEY=VALUE pairs
+          SAFE_TEST_ENV=$(printf '%q ' ${INPUT_TEST_ENV})
+        fi
+        if [[ -n "${INPUT_SWIFT_TEST_FLAGS}" ]]; then
+          # shellcheck disable=SC2086 # intentional word-split of flag list
+          SAFE_TEST_FLAGS=$(printf '%q ' ${INPUT_SWIFT_TEST_FLAGS})
+        fi
+
         for XCTEST in ${TEST_BASE_FOLDER}/*${TEST_RUNNER_SUFFIX}; do
           XCTEST_BASE=$(basename "${XCTEST}")
-          TEST_CMD="${{ inputs.test-env }} ./${XCTEST_BASE} ${{ inputs.swift-test-flags }}"
+          TEST_CMD="${SAFE_TEST_ENV} ./${XCTEST_BASE} ${SAFE_TEST_FLAGS}"
 
           # API <= 23 has no DT_RUNPATH support; force LD_LIBRARY_PATH
           if [[ "${API_LEVEL}" -le 23 ]]; then
