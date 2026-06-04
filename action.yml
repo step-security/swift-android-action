@@ -375,7 +375,6 @@ runs:
       if: ${{ steps.cache-swift.outputs.cache-hit != 'true' && inputs.installed-swift == '' }}
       shell: bash
       run: |
-        set -euo pipefail
         DOWNLOAD_DIR="${{ runner.temp }}/swift-download"
         mkdir -p "${DOWNLOAD_DIR}"
         cd "${DOWNLOAD_DIR}"
@@ -407,7 +406,6 @@ runs:
       if: ${{ inputs.installed-swift == '' }}
       shell: bash
       run: |
-        set -euo pipefail
         cd "${{ runner.temp }}/swift-download"
         SWIFT_ID="${{ steps.setup.outputs.swift-id }}"
 
@@ -441,7 +439,6 @@ runs:
       if: ${{ inputs.installed-swift != '' }}
       shell: bash
       run: |
-        set -euo pipefail
         SWIFT_INSTALLATION="${{ inputs.installed-swift }}/usr"
         printf 'SWIFT_INSTALLATION=%s\n' "${SWIFT_INSTALLATION}" >> "$GITHUB_ENV"
         printf 'swiftroot=%s\n'          "${SWIFT_INSTALLATION}" >> "$GITHUB_OUTPUT"
@@ -453,7 +450,6 @@ runs:
         INPUT_SWIFT_BUILD_FLAGS: ${{ inputs.swift-build-flags }}
       run: |
         set +x
-        set -eo pipefail
 
         BRANCH="${{ steps.setup.outputs.swift-branch }}"
         SWIFT_ID="${{ steps.setup.outputs.swift-id }}"
@@ -629,8 +625,6 @@ runs:
       shell: bash
       working-directory: ${{ inputs.package-path }}
       run: |
-        set -euo pipefail
-
         BUILD_TESTS_FLAG=""
         [[ "${{ inputs.build-tests }}" == "true" ]] && BUILD_TESTS_FLAG="--build-tests"
 
@@ -655,8 +649,6 @@ runs:
         INPUT_SWIFT_TEST_FLAGS: ${{ inputs.swift-test-flags }}
         INPUT_COPY_FILES: ${{ inputs.copy-files }}
       run: |
-        set -eo pipefail
-
         # macOS-on-ARM cannot run nested virtualization -> emulator dies with
         # HV_UNSUPPORTED. Don't hard-fail because self-hosted runners may
         # actually be capable.
