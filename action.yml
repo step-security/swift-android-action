@@ -364,7 +364,7 @@ runs:
         fi
 
     - name: Cache Swift ${{ steps.setup.outputs.swift-version }} Host Toolchain
-      uses: actions/cache@v5
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       id: cache-swift
       if: ${{ inputs.installed-swift == '' }}
       with:
@@ -764,7 +764,7 @@ runs:
 
     - name: Setup Android Emulator Cache
       if: ${{ inputs.run-tests == 'true' && inputs.build-tests == 'true' && inputs.build-package == 'true' }}
-      uses: actions/cache@v5
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       id: avd-cache
       with:
         path: |
@@ -774,7 +774,7 @@ runs:
 
     - name: Create Android Emulator Cache
       if: ${{ inputs.run-tests == 'true' && inputs.build-tests == 'true' && inputs.build-package == 'true' && steps.avd-cache.outputs.cache-hit != 'true' }}
-      uses: step-security/android-emulator-runner@v2
+      uses: step-security/android-emulator-runner@a1fbe8632b7c7bb8a2b5119cc9749ff729ca09fc # v2.37.0
       with:
         force-avd-creation: false
         api-level: ${{ inputs.android-api-level }}
@@ -791,7 +791,7 @@ runs:
 
     - name: Run Tests on Android emulator
       if: ${{ inputs.run-tests == 'true' && inputs.build-tests == 'true' && inputs.build-package == 'true' }}
-      uses: step-security/android-emulator-runner@v2
+      uses: step-security/android-emulator-runner@a1fbe8632b7c7bb8a2b5119cc9749ff729ca09fc # v2.37.0
       with:
         force-avd-creation: false
         api-level: ${{ inputs.android-api-level }}
