@@ -782,7 +782,7 @@ runs:
 
     - name: Create Android Emulator Cache
       if: ${{ inputs.run-tests == 'true' && inputs.build-tests == 'true' && inputs.build-package == 'true' && steps.avd-cache.outputs.cache-hit != 'true' }}
-      uses: eactivecircus/android-emulator-runner@main
+      uses: reactivecircus/android-emulator-runner@main
       with:
         force-avd-creation: false
         api-level: ${{ inputs.android-api-level }}
