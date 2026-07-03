@@ -1,0 +1,18 @@
+{
+   "schema_version": "1",
+   "onboarding_type": "reimplemented",
+   "archived": false,
+   "maintained_action_name": "step-security/swift-android-action",
+   "upstream_full_repo_name": "skiptools/swift-android-action",
+   "action_type": "composite",
+   "last_release": {
+     "tag_name": "v2.9.5",
+     "created_at": "2026-06-04T10:41:33Z",
+     "published_at": "2026-06-05T14:13:35Z"
+   },
+   "sync": {
+     "ignore_presets": [
+       "defaults_v1"
+     ]
+   }
+ }
